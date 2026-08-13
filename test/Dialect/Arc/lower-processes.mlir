@@ -615,3 +615,22 @@ hw.module @ObserveResumeArg(in %a: i8) {
     llhd.halt
   }
 }
+
+// Cleanup of empty coroutines (body contains only `llhd.return`) and calls of them.
+// Such a coroutine has no observable effect, and leaving the call in the outlined
+// Arc coroutine would make it illegal for the subsequent Arc conversion.
+// CHECK-NOT:   llhd.call_coroutine @empty_statement()
+// CHECK-NOT:   llhd.coroutine private @empty_statement()
+hw.module @CleanEmptyCoroutinesAndCalls () {
+  llhd.process {
+    llhd.call_coroutine @empty_statement() : () -> ()
+    llhd.halt
+  }
+  llhd.process {
+    llhd.call_coroutine @empty_statement() : () -> ()
+    llhd.halt
+  }
+}
+llhd.coroutine private @empty_statement() {
+  llhd.return
+}

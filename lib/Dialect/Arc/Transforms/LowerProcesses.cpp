@@ -68,6 +68,14 @@ using llvm::SmallDenseSet;
 
 namespace {
 
+bool isEmptyCoroutine(llhd::CoroutineOp coroutine) {
+  if (!coroutine.getBody().hasOneBlock())
+    return false;
+  auto &block = coroutine.getBody().front();
+  return block.without_terminator().empty() &&
+         isa<llhd::ReturnOp>(block.getTerminator());
+}
+
 /// Worker that lowers a single `llhd.process` op.
 struct ProcessLowering {
   ProcessLowering(llhd::ProcessOp processOp, SymbolTable &symbolTable)
@@ -76,6 +84,7 @@ struct ProcessLowering {
   LogicalResult run();
 
 private:
+  void eraseEmptyCoroutineCalls();
   void collectCaptures();
   void createCoroutine();
   void addEntryAndResumeBlockArguments();
@@ -153,6 +162,18 @@ void ProcessLowering::collectCaptures() {
       if (captureSet.insert(value).second)
         captures.push_back(value);
     }
+  });
+}
+
+// Erase calls to coroutines whose body contains only `llhd.return`. Such a
+// coroutine has no observable effect, and leaving the call in the outlined
+// Arc coroutine would make it illegal for the subsequent Arc conversion.
+void ProcessLowering::eraseEmptyCoroutineCalls() {
+  processOp.walk([&](llhd::CallCoroutineOp call) {
+    auto coroutine = SymbolTable::lookupNearestSymbolFrom<llhd::CoroutineOp>(
+        call, call.getCalleeAttr());
+    if (coroutine && isEmptyCoroutine(coroutine))
+      call.erase();
   });
 }
 
@@ -461,6 +482,7 @@ void ProcessLowering::buildInstance() {
 }
 
 LogicalResult ProcessLowering::run() {
+  eraseEmptyCoroutineCalls();
   collectCaptures();
   createCoroutine();
   addEntryAndResumeBlockArguments();
@@ -491,6 +513,7 @@ namespace {
 struct LowerProcessesPass
     : public arc::impl::LowerProcessesPassBase<LowerProcessesPass> {
   void runOnOperation() override;
+  void eraseEmptyCoroutines();
 };
 } // namespace
 
@@ -504,6 +527,21 @@ void LowerProcessesPass::runOnOperation() {
     if (failed(lowering.run()))
       anyFailed = true;
   });
+
+  eraseEmptyCoroutines();
+
   if (anyFailed)
     signalPassFailure();
+}
+
+void LowerProcessesPass::eraseEmptyCoroutines() {
+  SmallVector<llhd::CoroutineOp> emptyCoroutines;
+  auto module = getOperation();
+  module.walk([&](llhd::CoroutineOp coroutine) {
+    if (isEmptyCoroutine(coroutine) &&
+        SymbolTable::symbolKnownUseEmpty(coroutine, module))
+      emptyCoroutines.push_back(coroutine);
+  });
+  for (auto coroutine : emptyCoroutines)
+    coroutine.erase();
 }
